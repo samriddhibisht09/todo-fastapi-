@@ -1,81 +1,93 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database import engine, SessionLocal
+from app.models import Base, Todo
+from app.schemas import TodoCreate, TodoUpdate
 
 app = FastAPI()
 
-todos = []
-next_id = 1
+Base.metadata.create_all(bind=engine)
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-@app.get("/")
+
+def validate_task(task: str):
+    task = task.strip()
+
+    if not task:
+        raise HTTPException(status_code=400, detail="Task cannot be empty")
+
+    if task.isdigit():
+        raise HTTPException(status_code=400, detail="Task cannot contain only numbers")
+
+    if len(task) < 3:
+        raise HTTPException(status_code=400, detail="Task must be at least 3 characters")
+
+    if len(task) > 100:
+        raise HTTPException(status_code=400, detail="Task too long")
+
+    if not any(char.isalpha() for char in task):
+        raise HTTPException(status_code=400, detail="Task must contain at least one letter")
+
+    return task
+
+
+@app.get("/home")
 def home():
-    return {"message": "Todo API Running"}
+    return {"message": "Todo API Running with SQLite Database"}
 
 
 @app.get("/todos")
-def get_todos():
+def get_todos(db: Session = Depends(get_db)):
+    todos = db.query(Todo).all()
     return todos
 
 
 @app.post("/todos")
-def add_todo(task: str):
+def add_todo(todo_data: TodoCreate, db: Session = Depends(get_db)):
+    task = validate_task(todo_data.task)
 
-    global next_id
+    existing_todo = db.query(Todo).filter(Todo.task.ilike(task)).first()
 
-    task = task.strip()
+    if existing_todo:
+        raise HTTPException(status_code=400, detail="Task already exists")
 
-    if not task:
-        return {"error": "Task cannot be empty"}
+    new_todo = Todo(task=task, completed=False)
 
-    if task.isdigit():
-        return {"error": "Task cannot contain only numbers"}
-
-    if len(task) < 3:
-        return {"error": "Task must be at least 3 characters"}
-
-    if len(task) > 100:
-        return {"error": "Task too long"}
-
-    if not any(char.isalpha() for char in task):
-        return {"error": "Task must contain at least one letter"}
-
-    for todo in todos:
-        if todo["task"].lower() == task.lower():
-            return {"error": "Task already exists"}
-
-    new_todo = {
-        "id": next_id,
-        "task": task,
-        "completed": False
-    }
-
-    todos.append(new_todo)
-
-    next_id += 1
+    db.add(new_todo)
+    db.commit()
+    db.refresh(new_todo)
 
     return {
         "message": "Todo added",
         "todo": new_todo
     }
+
+
 @app.get("/todos/stats")
-def get_stats():
+def get_stats(db: Session = Depends(get_db)):
+    todos = db.query(Todo).all()
 
     total = len(todos)
-
     completed = 0
     pending = 0
-
     completed_tasks = []
     pending_tasks = []
 
     for todo in todos:
-
-        if todo["completed"]:
+        if todo.completed:
             completed += 1
-            completed_tasks.append(todo["task"])
+            completed_tasks.append(todo.task)
         else:
             pending += 1
-            pending_tasks.append(todo["task"])
+            pending_tasks.append(todo.task)
 
     completion_percentage = 0
 
@@ -90,54 +102,47 @@ def get_stats():
         "completed_tasks": completed_tasks,
         "pending_tasks": pending_tasks
     }
+
+
 @app.get("/todos/{todo_id}")
-def get_todo(todo_id: int):
+def get_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
 
-    for todo in todos:
-        if todo["id"] == todo_id:
-            return todo
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
 
-    return {"error": "Todo not found"}
+    return todo
+
+
+@app.put("/todos/{todo_id}")
+def update_todo(todo_id: int, todo_data: TodoUpdate, db: Session = Depends(get_db)):
+    task = validate_task(todo_data.task)
+
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
+
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+
+    todo.task = task
+    todo.completed = todo_data.completed
+
+    db.commit()
+    db.refresh(todo)
+
+    return {
+        "message": "Todo updated",
+        "todo": todo
+    }
+
 
 @app.delete("/todos/{todo_id}")
-def delete_todo(todo_id: int):
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
 
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
 
-    for todo in todos:
-        if todo["id"] == todo_id:
-            todos.remove(todo)
-            return {"message": "Todo deleted"}
+    db.delete(todo)
+    db.commit()
 
-    return {"error": "Todo not found"}
-@app.put("/todos/{todo_id}")
-def update_todo(todo_id: int, task: str, completed: bool):
-
-    task = task.strip()
-
-    if not task:
-        return {"error": "Task cannot be empty"}
-
-    if task.isdigit():
-        return {"error": "Task cannot contain only numbers"}
-
-    if len(task) < 3:
-        return {"error": "Task must be at least 3 characters"}
-
-    if len(task) > 100:
-        return {"error": "Task too long"}
-
-    for todo in todos:
-
-        if todo["id"] == todo_id:
-
-            todo["task"] = task
-            todo["completed"] = completed
-
-            return {
-                "message": "Todo updated",
-                "todo": todo
-            }
-
-    return {"error": "Todo not found"}
-#thank you 
-#this is my code 
+    return {"message": "Todo deleted"}
